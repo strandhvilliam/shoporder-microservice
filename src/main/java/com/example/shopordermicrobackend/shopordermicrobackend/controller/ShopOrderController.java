@@ -1,11 +1,13 @@
 package com.example.shopordermicrobackend.shopordermicrobackend.controller;
 
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 
 import org.json.JSONArray;
-import org.json.JSONException;
 import org.json.JSONObject;
 import org.slf4j.Logger;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -20,8 +22,34 @@ import com.example.shopordermicrobackend.shopordermicrobackend.model.ShopOrderDe
 import com.example.shopordermicrobackend.shopordermicrobackend.repository.ShopOrderDetailRepository;
 import com.example.shopordermicrobackend.shopordermicrobackend.repository.ShopOrderRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+
+import io.netty.handler.codec.http.HttpMethod;
+
+class Customer {
+    protected Long id;
+    protected String name;
+    protected String ssn;
+
+    Customer(Long id, String name, String ssn) {
+        this.id = id;
+        this.name = name;
+        this.ssn = ssn;
+    }
+
+}
+
+class Item {
+    protected Long id;
+    protected String name;
+    protected Integer price;
+
+    Item(Long id, String name, Integer price) {
+        this.id = id;
+        this.name = name;
+        this.price = price;
+    }
+}
 
 @RestController
 public class ShopOrderController {
@@ -50,20 +78,9 @@ public class ShopOrderController {
     }
 
     @GetMapping("/orders2")
-    public String getOrders2() throws JsonMappingException, JsonProcessingException, JSONException {
+    public String getOrders2() throws JsonProcessingException {
 
         RestTemplate restTemplate = new RestTemplate();
-
-        String cHost = System.getenv("CUSTOMER_HOST");
-        String cPort = System.getenv("CUSTOMER_PORT");
-        String pHost = System.getenv("PRODUCT_HOST");
-        String pPort = System.getenv("PRODUCT_PORT");
-
-        String result = restTemplate.getForObject("http://" + cHost + ":" + cPort + "/customers", String.class);
-        String result2 = restTemplate.getForObject("http://" + pHost + ":" + pPort + "/products", String.class);
-
-        logger.info("RESULT: " + result);
-        logger.info("RESULT2: " + result2);
 
         List<ShopOrder> shopOrders = shopOrderRepository.findAll();
 
@@ -73,32 +90,54 @@ public class ShopOrderController {
             List<ShopOrderDetail> shopOrderDetails = shopOrderDetailRepository.findByOrderId(shopOrder.getId());
             shopOrder.setShopOrderDetails(shopOrderDetails);
 
-            String customerId = shopOrder.getCustomerId().toString();
-            logger.info("customerId: " + customerId);
+            Long customerId = shopOrder.getCustomerId();
+            
+            String customerString = restTemplate.getForObject("http://customerservice:8080/customers/" + customerId, String.class);
 
-            String customer = restTemplate.getForObject("http://" + cHost + ":" + cPort + "/customers/" + customerId,
-                    String.class);
+            JSONObject customerJsonObject = new JSONObject(customerString);
 
-            JSONObject jsonObject = new JSONObject();
-            jsonObject.put("id", shopOrder.getId());
-            jsonObject.put("orderDate", shopOrder.getOrderDate());
-            jsonObject.put("customer", objectMapper.readTree(customer));
-            JSONArray details = new JSONArray();
+            Customer customer = new Customer(customerJsonObject.getLong("id"), customerJsonObject.getString("name"),
+                    customerJsonObject.getString("ssn"));
+
+
+            JSONObject responseObject = new JSONObject();
+
+            responseObject.put("id", shopOrder.getId());
+            responseObject.put("orderDate", shopOrder.getOrderDate());
+            JSONObject customerObject = new JSONObject();
+            customerObject.put("id", customer.id);
+            customerObject.put("name", customer.name);
+            customerObject.put("ssn", customer.ssn);
+            responseObject.put("customer", customerObject);
+
+            JSONArray orderedItems = new JSONArray();
 
             for (ShopOrderDetail detail : shopOrder.getShopOrderDetails()) {
-                String productId = detail.getProductId().toString();
-                logger.info("productId: " + productId);
-                String product = restTemplate.getForObject("http://" + pHost + ":" + pPort + "/products/" + productId,
-                        String.class);
-                details.put(product);
+                Long itemId = detail.getItemId();
+                logger.info("itemId: " + itemId);
+            
+                String itemString = restTemplate.getForObject("http://itemservice:8080/item/" + itemId, String.class);
+
+                JSONObject itemJsonObject = new JSONObject(itemString);
+
+                Item item = new Item(itemJsonObject.getLong("id"), itemJsonObject.getString("name"),
+                        itemJsonObject.getInt("price"));
+
+                if (item != null) {
+                    JSONObject itemObject = new JSONObject();
+                    itemObject.put("id", item.id);
+                    itemObject.put("name", item.name);
+                    itemObject.put("price", item.price);
+                    orderedItems.put(itemObject);
+                }
             }
 
-            jsonObject.put("products", details);
-            jsonArray.put(jsonObject);
-
+            responseObject.put("items", orderedItems);
+            jsonArray.put(responseObject);
         }
 
         return jsonArray.toString();
+
     }
 
     @GetMapping("/orders/{id}")

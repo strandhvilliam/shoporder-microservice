@@ -17,6 +17,6 @@ public class ShopOrderDetail {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
-    private Long productId;
+    private Long itemId;
     private Long orderId = 0L;
 }
