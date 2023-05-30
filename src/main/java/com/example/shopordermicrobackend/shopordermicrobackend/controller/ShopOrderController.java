@@ -1,10 +1,10 @@
 package com.example.shopordermicrobackend.shopordermicrobackend.controller;
 
 import java.time.LocalDateTime;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
+import java.util.Objects;
 
+import com.example.shopordermicrobackend.shopordermicrobackend.exception.CustomerNotFoundException;
 import com.example.shopordermicrobackend.shopordermicrobackend.exception.ErrorResponse;
 import com.example.shopordermicrobackend.shopordermicrobackend.exception.InvalidAuthException;
 import com.example.shopordermicrobackend.shopordermicrobackend.exception.OrderNotFoundException;
@@ -46,60 +46,67 @@ public class ShopOrderController {
 
     @Operation(summary = "Gets all orders")
     @GetMapping("/orders")
-    public ResponseEntity<List<ResponseObject>> getOrders(@RequestHeader String authorization) {
-
-        logger.info("Authorization header: " + authorization);
-
+    public ResponseEntity<List<ShopOrderResponse>> getOrders(@RequestHeader String authorization) {
         HttpHeaders headers = new HttpHeaders();
-
         headers.set("Authorization", authorization);
-
-        List<ShopOrder> shopOrders = shopOrderRepository.findAll();
-
-        List<ResponseObject> responseArray = new ArrayList<>();
-
-        for (ShopOrder shopOrder : shopOrders) {
-            ResponseObject responseObject = parseOrder(shopOrder, headers);
-            responseArray.add(responseObject);
-        }
-
+        List<ShopOrderResponse> responseArray = shopOrderRepository
+                .findAll()
+                .stream()
+                .map(shopOrder -> parseOrder(shopOrder, headers))
+                .toList();
         return new ResponseEntity<>(responseArray, HttpStatus.OK);
-
     }
 
     @Operation(summary = "Gets order by id")
     @GetMapping("/orders/{id}")
-    public ResponseObject getOrderById(@Min(0) @PathVariable Long id, @RequestHeader String authorization) {
+    public ShopOrderResponse getOrderById(@Min(0) @PathVariable Long id, @RequestHeader String authorization) {
         ShopOrder shopOrder = shopOrderRepository.findById(id).orElseThrow(() -> new OrderNotFoundException(id));
-
         HttpHeaders headers = new HttpHeaders();
-
         headers.set("Authorization", authorization);
-
         return parseOrder(shopOrder, headers);
     }
 
     @Operation(summary = "Creates an order")
     @PostMapping("/orders")
-    public ResponseEntity<ShopOrder> postOrders(@Valid @RequestBody ShopOrder body) {
+    public ResponseEntity<ShopOrder> postOrders(@Valid @RequestBody ShopOrder body, @RequestHeader String authorization) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("Authorization", authorization);
+        logger.info("Customer id: {}", body.getCustomerId());
+        try {
+            Objects.requireNonNull(restTemplate.exchange(
+                    "http://customerservice:8080/customers/" + body.getCustomerId(),
+                    HttpMethod.GET,
+                    new HttpEntity<>(headers),
+                    Customer.class
+            ).getBody());
+
+        } catch (HttpClientErrorException.Unauthorized e) {
+            logger.error(e.getMessage());
+            throw new InvalidAuthException();
+        } catch (Exception e) {
+            logger.error(e.getMessage());
+            throw new CustomerNotFoundException(body.getCustomerId());
+        }
+
         ShopOrder savedOrder = shopOrderRepository.save(body);
+
+        logger.info("Order created with id {}", savedOrder.getId());
 
         List<ShopOrderDetail> shopOrderDetails = body.getShopOrderDetails();
 
-        for (ShopOrderDetail shopOrderDetail : shopOrderDetails) {
+        boolean hasDetailViolations = shopOrderDetails.stream()
+                .map(detail -> validator.validate(detail))
+                .anyMatch(violations -> !violations.isEmpty());
 
-            Set<ConstraintViolation<ShopOrderDetail>> detailViolations = validator.validate(shopOrderDetail);
-
-            if (!detailViolations.isEmpty()) {
-                logger.error("ShopOrderDetail validation failed");
-                return new ResponseEntity<>(HttpStatus.BAD_REQUEST);
-            }
-
-            shopOrderDetail.setOrderId(savedOrder.getId());
-            shopOrderDetailRepository.save(shopOrderDetail);
+        if (hasDetailViolations) {
+            logger.error("ShopOrderDetail validation failed");
+            return new ResponseEntity<>(HttpStatus.BAD_REQUEST);
         }
 
-        return new ResponseEntity<>(savedOrder, HttpStatus.CREATED);
+        shopOrderDetails.forEach(shopOrderDetail -> shopOrderDetail.setOrderId(savedOrder.getId()));
+        shopOrderDetailRepository.saveAll(shopOrderDetails);
+
+        return ResponseEntity.status(HttpStatus.CREATED).body(savedOrder);
 
     }
 
@@ -116,11 +123,16 @@ public class ShopOrderController {
 
     @Operation(summary = "Deletes an order")
     @DeleteMapping("/orders/{id}")
-    public void deleteOrder(@Min(0) @PathVariable Long id) {
+    public String deleteOrder(@Min(0) @PathVariable Long id) {
         shopOrderRepository.deleteById(id);
+
+        List<ShopOrderDetail> shopOrderDetails = shopOrderDetailRepository.findByOrderId(id);
+        shopOrderDetailRepository.deleteAll(shopOrderDetails);
+
+        return "Order deleted";
     }
 
-    public ResponseObject parseOrder(ShopOrder shopOrder, HttpHeaders headers) {
+    public ShopOrderResponse parseOrder(ShopOrder shopOrder, HttpHeaders headers) {
 
         List<ShopOrderDetail> shopOrderDetails = shopOrderDetailRepository.findByOrderId(shopOrder.getId());
         shopOrder.setShopOrderDetails(shopOrderDetails);
@@ -129,32 +141,36 @@ public class ShopOrderController {
         JSONObject customerJsonObject;
 
         try {
-            String customerString = restTemplate.exchange("http://customerservice:8080/customers/" + customerId, HttpMethod.GET, new HttpEntity<>(headers), String.class).getBody();
+            String customerString = restTemplate.exchange(
+                    "http://customerservice:8080/customers/" + customerId,
+                    HttpMethod.GET,
+                    new HttpEntity<>(headers), String.class).getBody();
             customerJsonObject = new JSONObject(customerString);
         } catch (HttpClientErrorException.Unauthorized e) {
             throw new InvalidAuthException();
         }
 
-        Customer customer = new Customer(customerJsonObject.getLong("id"), customerJsonObject.getString("name"),
+        Customer customer = new Customer(
+                customerJsonObject.getLong("id"),
+                customerJsonObject.getString("name"),
                 customerJsonObject.getString("ssn"));
 
 
-        List<Item> items = new ArrayList<>();
+        List<Item> items = shopOrder.getShopOrderDetails().stream()
+                .map(ShopOrderDetail::getItemId)
+                .map(itemId -> restTemplate.getForObject("http://itemservice:8080/item/" + itemId, String.class))
+                .map(JSONObject::new)
+                .map(itemJsonObject -> new Item(itemJsonObject.getLong("id"), itemJsonObject.getString("name"),
+                        itemJsonObject.getInt("price")))
+                .toList();
 
-        for (ShopOrderDetail detail : shopOrder.getShopOrderDetails()) {
-            Long itemId = detail.getItemId();
 
-            String itemString = restTemplate.getForObject("http://itemservice:8080/item/" + itemId, String.class);
-
-            JSONObject itemJsonObject = new JSONObject(itemString);
-
-            Item item = new Item(itemJsonObject.getLong("id"), itemJsonObject.getString("name"),
-                    itemJsonObject.getInt("price"));
-
-            items.add(item);
-        }
-
-        return new ResponseObject(shopOrder.getId(), shopOrder.getOrderDate(), customer, items);
+        return new ShopOrderResponse(
+                shopOrder.getId(),
+                shopOrder.getOrderDate(),
+                customer,
+                items
+        );
 
     }
 
@@ -167,6 +183,12 @@ public class ShopOrderController {
     @ResponseStatus(HttpStatus.NOT_FOUND)
     @ExceptionHandler({OrderNotFoundException.class})
     public ErrorResponse handleOrderNotFoundException(OrderNotFoundException e) {
+        return new ErrorResponse(e.getMessage(), HttpStatus.NOT_FOUND, LocalDateTime.now());
+    }
+
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    @ExceptionHandler({CustomerNotFoundException.class})
+    public ErrorResponse handleCustomerNotFoundException(CustomerNotFoundException e) {
         return new ErrorResponse(e.getMessage(), HttpStatus.NOT_FOUND, LocalDateTime.now());
     }
 }

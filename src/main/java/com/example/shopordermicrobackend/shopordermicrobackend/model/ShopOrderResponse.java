@@ -9,7 +9,7 @@ import java.util.List;
 
 @Data
 @AllArgsConstructor
-public class ResponseObject {
+public class ShopOrderResponse {
 
     private Long id;
     private Date orderDate;
