@@ -37,6 +37,7 @@ out/
 .vscode/
 
 .dockerignore
-
+docker-compose.yaml
 Dockerfile
+.gitignore
 
